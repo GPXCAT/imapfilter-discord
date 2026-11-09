@@ -1,0 +1,9 @@
+services:
+  discord-bot:
+    build: .
+    container_name: imapfilter-discord-bot
+    restart: always
+    # 如果你的 imapfilter 需要讀取宿主機的設定檔（例如 ~/.imapfilter/config.lua），
+    # 可以透過 volumes 把設定檔掛載進容器裡：
+    # volumes:
+    #   - ~/.imapfilter:/root/.imapfilter
