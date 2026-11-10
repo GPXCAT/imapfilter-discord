@@ -1,7 +1,12 @@
+import asyncio
+import io
 import os
-import subprocess
+from datetime import datetime
+
 import discord
 from discord.ext import commands, tasks
+
+from imap_summary import format_summary, has_problem
 
 # 設定 Discord 機器人的權限
 intents = discord.Intents.default()
@@ -43,39 +48,55 @@ async def on_ready():
 
 
 # =========================================================
+# 共用：執行 imapfilter（非同步，不會卡住機器人）
+# =========================================================
+IMAPFILTER_CMD = ['/usr/bin/imapfilter', '-v']
+
+
+async def run_imapfilter(timeout):
+    proc = await asyncio.create_subprocess_exec(
+        *IMAPFILTER_CMD,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,  # 合併輸出，保留原本順序
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    return out.decode('utf-8', errors='replace'), proc.returncode
+
+
+def log_file(raw):
+    name = f"imapfilter-{datetime.now():%Y%m%d-%H%M%S}.log"
+    return discord.File(io.BytesIO(raw.encode('utf-8')), filename=name)
+
+
+# =========================================================
 # 定時任務：自動背景執行
 # =========================================================
 @tasks.loop(minutes=10)
 async def scheduled_imapfilter():
     print("正在執行定時的 imapfilter 檢查...")
 
+    channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
+    if not channel:
+        print(f"警告：找不到 ID 為 {NOTIFICATION_CHANNEL_ID} 的頻道！")
+        return
+
     try:
-        # 在主機背景執行指令
-        result = subprocess.run(
-            ['/usr/bin/imapfilter', '-v'],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
-        output = result.stdout + result.stderr
-
-        if not output.strip():
-            output = "執行完畢，無輸出訊息。"
-
-        # 限制字數防止超過 Discord 2000 字極限
-        if len(output) > 1900:
-            output = output[:1900] + "\n...(輸出過長，已自動截斷)..."
-
-        # 尋找指定頻道並發送報告
-        channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
-        if channel:
-            await channel.send(f"🕒 **【定時自動執行報告】** `/usr/bin/imapfilter -v`\n```\n{output}\n```")
+        raw, code = await run_imapfilter(timeout=60)
+        summary = format_summary(raw, code, '🕒 定時自動執行報告')
+        # 有問題時才附上完整紀錄，平常只送摘要
+        if has_problem(raw, code):
+            await channel.send(summary, file=log_file(raw))
         else:
-            print(f"警告：找不到 ID 為 {NOTIFICATION_CHANNEL_ID} 的頻道！")
-
+            await channel.send(summary)
+    except asyncio.TimeoutError:
+        await channel.send("⚠️ **定時執行逾時**：imapfilter 超過 60 秒未回應。")
     except Exception as e:
-        print(f"定時執行發生錯誤：{str(e)}")
+        print(f"定時執行發生錯誤：{e}")
 
 @scheduled_imapfilter.before_loop
 async def before_scheduled_imapfilter():
@@ -86,30 +107,17 @@ async def before_scheduled_imapfilter():
 # 手動觸發指令：在 Discord 輸入 !imap
 # =========================================================
 @bot.command(name='imap')
-async def run_imapfilter(ctx):
+async def imap_command(ctx):
     await ctx.send("正在手動執行 `/usr/bin/imapfilter -v`...")
 
     try:
-        result = subprocess.run(
-            ['/usr/bin/imapfilter', '-v'],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        output = result.stdout + result.stderr
-        if not output.strip():
-            output = "指令執行完畢，沒有任何輸出訊息。"
-
-        if len(output) > 1900:
-            output = output[:1900] + "\n...(輸出過長，已自動截斷)..."
-
-        await ctx.send(f"```\n{output}\n```")
-
-    except subprocess.TimeoutExpired:
+        raw, code = await run_imapfilter(timeout=30)
+        summary = format_summary(raw, code, '手動執行結果')
+        await ctx.send(summary, file=log_file(raw))  # 手動執行一律附完整紀錄
+    except asyncio.TimeoutError:
         await ctx.send("執行逾時：imapfilter 執行超過 30 秒未回應。")
     except Exception as e:
-        await ctx.send(f"執行發生錯誤：`{str(e)}`")
+        await ctx.send(f"執行發生錯誤：`{e}`")
 
 
 # 取得 Token 並啟動機器人

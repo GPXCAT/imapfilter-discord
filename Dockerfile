@@ -9,6 +9,6 @@ RUN apt-get update && apt-get install -y imapfilter && rm -rf /var/lib/apt/lists
 RUN pip install --no-cache-dir discord.py
 
 # 複製程式碼
-COPY bot.py .
+COPY *.py .
 
 CMD ["python3", "bot.py"]
